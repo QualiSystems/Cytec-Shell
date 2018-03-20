@@ -1,3 +1,5 @@
+import socket
+
 from cloudshell.shell.core.resource_driver_interface import ResourceDriverInterface
 
 class CytecShellDriver (ResourceDriverInterface):
@@ -6,7 +8,7 @@ class CytecShellDriver (ResourceDriverInterface):
         """
         ctor must be without arguments, it is created with reflection at run time
         """
-        pass
+        self._communicator = None
 
     def initialize(self, context):
         """
@@ -14,7 +16,9 @@ class CytecShellDriver (ResourceDriverInterface):
         This is a good place to load and cache the driver configuration, initiate sessions etc.
         :param InitCommandContext context: the context the command runs on
         """
-        pass
+        address = context.resource.address
+        port =
+        self._communicator = TcpCommunicator(context.resource.address, )
 
     def create_loop(self, context, latency):
         """
@@ -180,3 +184,57 @@ class CytecShellDriver (ResourceDriverInterface):
         This is a good place to close any open sessions, finish writing to log files
         """
         pass
+
+
+class TcpCommunicator(object):
+    SOCKET_TIMEOUT = 2
+    NEW_LINE = '\r\n'
+    MAX_ATTEMPTS = 3
+
+    def __init__(self, address, port):
+        self._address = address
+        self._port = port
+        self._socket = self._initialize_socket(self._address, self._port)
+
+    @classmethod
+    def _initialize_socket(cls, address, port):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((address, int(port)))
+        s.settimeout(cls.SOCKET_TIMEOUT)
+        return s
+
+    def _reconnect_socket(self):
+        self._socket.close()
+        self._socket = self._initialize_socket(self._address, self._port)
+
+    def _validate_socket(self):
+        attempt = 0
+        while attempt < self.MAX_ATTEMPTS:
+            try:
+                self._socket.recv(4096)
+                self._socket.send(self.NEW_LINE)
+                self._socket.recv(4096)
+                self._reconnect_socket()
+            except socket.timeout, e:
+                return
+            except socket.error, e:
+                self._reconnect_socket()
+            finally:
+                attempt += 1
+        raise Exception(self.__class__.__name__, 'Socket validation failed')
+
+    def send_command(self, command):
+        self._validate_socket()
+        command += self.NEW_LINE
+        self._socket.send(command)
+        attempt = 0
+        data = ''
+        while attempt < self.MAX_ATTEMPTS:
+            try:
+                data += self._socket.recv(4096)
+            except socket.timeout, e:
+                return data
+            except socket.error, e:
+                self._reconnect_socket()
+            finally:
+                attempt += 1
