@@ -47,13 +47,18 @@ class CytecShellDriver(ResourceDriverInterface):
                 latency -= lat
         return result
 
+    def _clear_loops(self, communicator):
+        output = communicator.send_command('C')
+        if int(output) != 0:
+            raise Exception(self.__class__.__name__, 'Cannot clear loops, incorrect output')
+
     def _set_latency(self, communicator, latency):
-        communicator.send_command('C')
+        self._clear_loops(communicator)
         for port in self._calculate_ports_for_the_latency(latency):
             command = 'L 0 ' + str(port)
             output = communicator.send_command(command)
             if int(output) != 1:
-                raise Exception(self.__class__.__name__,'Cannot latch port {}, incorrect output'.format(port))
+                raise Exception(self.__class__.__name__, 'Cannot latch port {}, incorrect output'.format(port))
         self._latency = latency
 
     def initialize(self, context):
@@ -96,13 +101,9 @@ class CytecShellDriver(ResourceDriverInterface):
         :return:
         """
         logger = LoggingSessionContext.get_logger_for_context(context)
-
         communicator = self._obtain_communicator(context, logger)
-        output = communicator.send_command('C')
-        if int(output) == 0:
-            self._latency = 0
-        else:
-            raise Exception(self.__class__.__name__, 'Cannot clear loops, incorrect output')
+        self._clear_loops(communicator)
+        self._latency = 0
 
     # <editor-fold desc="Orchestration Save and Restore Standard">
     def orchestration_save(self, context, cancellation_context, mode, custom_params=None):
