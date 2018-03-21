@@ -1,14 +1,60 @@
-import socket
-
+from cloudshell.shell.core.context_utils import get_resource_address, get_attribute_by_name
+from cloudshell.shell.core.session.logging_session import LoggingSessionContext
 from cloudshell.shell.core.resource_driver_interface import ResourceDriverInterface
 
-class CytecShellDriver (ResourceDriverInterface):
+from cytec.tcp_communicator import TcpCommunicator
+
+
+class CytecShellDriver(ResourceDriverInterface):
+    LATENCY_TABLE = {100: 0,
+                     200: 1,
+                     400: 2,
+                     800: 3,
+                     1600: 4,
+                     3200: 5,
+                     6400: 6,
+                     12800: 7}
 
     def __init__(self):
         """
         ctor must be without arguments, it is created with reflection at run time
         """
         self._communicator = None
+        self._latency = 0
+
+    def _obtain_communicator(self, context, logger=None):
+        if not logger:
+            logger = LoggingSessionContext.get_logger_for_context(context)
+        address = get_resource_address(context)
+        port = get_attribute_by_name('CLI TCP Port', context)
+
+        if not self._communicator:
+            self._communicator = TcpCommunicator(address, port, logger)
+        else:
+            if self._communicator.address != address or self._communicator.port != port:
+                self._communicator.close()
+                self._communicator = TcpCommunicator(address, port, logger)
+            else:
+                self._communicator.logger = logger
+        return self._communicator
+
+    def _calculate_ports_for_the_latency(self, latency):
+        latency = int(latency)
+        result = []
+        for lat in sorted(self.LATENCY_TABLE)[::-1]:
+            if latency >= lat:
+                result.append(self.LATENCY_TABLE[lat])
+                latency -= lat
+        return result
+
+    def _set_latency(self, communicator, latency):
+        communicator.send_command('C')
+        for port in self._calculate_ports_for_the_latency(latency):
+            command = 'L 0 ' + str(port)
+            output = communicator.send_command(command)
+            if int(output) != 1:
+                raise Exception(self.__class__.__name__,'Cannot latch port {}, incorrect output'.format(port))
+        self._latency = latency
 
     def initialize(self, context):
         """
@@ -16,9 +62,7 @@ class CytecShellDriver (ResourceDriverInterface):
         This is a good place to load and cache the driver configuration, initiate sessions etc.
         :param InitCommandContext context: the context the command runs on
         """
-        address = context.resource.address
-        port =
-        self._communicator = TcpCommunicator(context.resource.address, )
+        pass
 
     def create_loop(self, context, latency):
         """
@@ -27,7 +71,11 @@ class CytecShellDriver (ResourceDriverInterface):
         :param latency:
         :return:
         """
-        pass
+        latency = int(latency)
+        logger = LoggingSessionContext.get_logger_for_context(context)
+        logger.debug('Creating loop for the latency {}'.format(latency))
+        communicator = self._obtain_communicator(context, logger)
+        self._set_latency(communicator, latency)
 
     def extend_loop(self, context):
         """
@@ -35,7 +83,11 @@ class CytecShellDriver (ResourceDriverInterface):
         :param context:
         :return:
         """
-        pass
+        logger = LoggingSessionContext.get_logger_for_context(context)
+        latency = self._latency + 100
+        logger.debug('Extending loop to {}'.format(self._latency))
+        communicator = self._obtain_communicator(context, logger)
+        self._set_latency(communicator, latency)
 
     def clear_loops(self, context):
         """
@@ -43,7 +95,14 @@ class CytecShellDriver (ResourceDriverInterface):
         :param context:
         :return:
         """
-        pass
+        logger = LoggingSessionContext.get_logger_for_context(context)
+
+        communicator = self._obtain_communicator(context, logger)
+        output = communicator.send_command('C')
+        if int(output) == 0:
+            self._latency = 0
+        else:
+            raise Exception(self.__class__.__name__, 'Cannot clear loops, incorrect output')
 
     # <editor-fold desc="Orchestration Save and Restore Standard">
     def orchestration_save(self, context, cancellation_context, mode, custom_params=None):
@@ -121,7 +180,6 @@ class CytecShellDriver (ResourceDriverInterface):
 
     # </editor-fold>
 
-
     # <editor-fold desc="Discovery">
 
     def get_inventory(self, context):
@@ -164,7 +222,6 @@ class CytecShellDriver (ResourceDriverInterface):
 
     # </editor-fold>
 
-
     # <editor-fold desc="Health Check">
 
     def health_check(self, cancellation_context):
@@ -177,64 +234,9 @@ class CytecShellDriver (ResourceDriverInterface):
 
     # </editor-fold>
 
-
     def cleanup(self):
         """
         Destroy the driver session, this function is called everytime a driver instance is destroyed
         This is a good place to close any open sessions, finish writing to log files
         """
         pass
-
-
-class TcpCommunicator(object):
-    SOCKET_TIMEOUT = 2
-    NEW_LINE = '\r\n'
-    MAX_ATTEMPTS = 3
-
-    def __init__(self, address, port):
-        self._address = address
-        self._port = port
-        self._socket = self._initialize_socket(self._address, self._port)
-
-    @classmethod
-    def _initialize_socket(cls, address, port):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((address, int(port)))
-        s.settimeout(cls.SOCKET_TIMEOUT)
-        return s
-
-    def _reconnect_socket(self):
-        self._socket.close()
-        self._socket = self._initialize_socket(self._address, self._port)
-
-    def _validate_socket(self):
-        attempt = 0
-        while attempt < self.MAX_ATTEMPTS:
-            try:
-                self._socket.recv(4096)
-                self._socket.send(self.NEW_LINE)
-                self._socket.recv(4096)
-                self._reconnect_socket()
-            except socket.timeout, e:
-                return
-            except socket.error, e:
-                self._reconnect_socket()
-            finally:
-                attempt += 1
-        raise Exception(self.__class__.__name__, 'Socket validation failed')
-
-    def send_command(self, command):
-        self._validate_socket()
-        command += self.NEW_LINE
-        self._socket.send(command)
-        attempt = 0
-        data = ''
-        while attempt < self.MAX_ATTEMPTS:
-            try:
-                data += self._socket.recv(4096)
-            except socket.timeout, e:
-                return data
-            except socket.error, e:
-                self._reconnect_socket()
-            finally:
-                attempt += 1
